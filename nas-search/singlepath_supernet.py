@@ -303,7 +303,7 @@ class SinglePathSuperNet(tf.keras.Model):
 
     tf.logging.info('Runtime model parsed')
     assert self._search_space == 'mnasnet' # currently supported one
-    lutmodel_filename = "../models/pixel1_runtime_model.json"
+    lutmodel_filename = "./pixel1_runtime_model.json"
     with open(lutmodel_filename, 'r') as f:
       self._runtime_lut = json.load(f)
 
