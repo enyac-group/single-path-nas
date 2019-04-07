@@ -6,7 +6,8 @@
 # This project incorporates material from the project listed above, and it
 # is accessible under their original license terms (Apache License 2.0)
 # ==============================================================================
-"""Creates the MNasNet-based macro-arch backbone."""
+"""Creates the ConvNet found model by parsing the NAS-decision values 
+   from the provided NAS-search output dir."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -16,6 +17,7 @@ import re
 import tensorflow as tf
 
 import model_def
+import numpy as np
 
 
 class MnasNetDecoder(object):
@@ -104,18 +106,31 @@ class MnasNetDecoder(object):
     return block_strings
 
 
-def mnasnet_3x3_1(depth_multiplier=None):
-  """Creates a mnasnet-3x3-1.
+import parse_netarch
+def parse_netarch(parse_lambda_dir, depth_multiplier=None):
+  """Creates the RNAS found model. No need to hard-code
+  model, it parses the output of previous search
+
+  Args:
+    depth_multiplier: multiplier to number of filters per layer.
+
+  Returns:
+    blocks_args: a list of BlocksArgs for internal MnasNet blocks.
+    global_params: GlobalParams, global parameters for the model.
   """
-  blocks_args = [
-      'r1_k3_s11_e1_i32_o16_noskip', 
-      'r4_k3_s22_e1_i16_o24',
-      'r4_k3_s22_e1_i24_o40', 
-      'r4_k3_s22_e1_i40_o80', 
-      'r4_k3_s11_e1_i80_o96',
-      'r4_k3_s22_e1_i96_o192', 
-      'r1_k3_s11_e6_i192_o320_noskip'
-  ]
+  # Loading too much data is slow...
+  tf_size_guidance = {
+        'compressedHistograms': 10,
+        'images': 0,
+        'scalars': 100,
+        'histograms': 1
+  }
+  indicator_values = parse_netarch.parse_indicators_single_path_nas(parse_lambda_dir, tf_size_guidance)
+  network = parse_netarch.encode_single_path_nas_arch(indicator_values)
+  parse_netarch.print_net(network)
+  blocks_args = parse_netarch.mnasnet_encoder(network)
+  parse_netarch.print_encoded_net(blocks_args)
+
   decoder = MnasNetDecoder()
   global_params = model_def.GlobalParams(
       batch_norm_momentum=0.99,
@@ -129,36 +144,10 @@ def mnasnet_3x3_1(depth_multiplier=None):
   return decoder.decode(blocks_args), global_params
 
 
-def mnasnet_backbone(k, e):
-  """Creates a mnasnet-like model with a certain type 
-     of MBConv layers (k, e).
-  """
-  blocks_args = [
-      'r1_k3_s11_e1_i32_o16_noskip', 
-      'r4_k'+str(k)+'_s22_e'+str(e)+'_i16_o24',
-      'r4_k'+str(k)+'_s22_e'+str(e)+'_i24_o40', 
-      'r4_k'+str(k)+'_s22_e'+str(e)+'_i40_o80', 
-      'r4_k'+str(k)+'_s11_e'+str(e)+'_i80_o96',
-      'r4_k'+str(k)+'_s22_e'+str(e)+'_i96_o192', 
-      'r1_k3_s11_e6_i192_o320_noskip'
-  ]
-  decoder = MnasNetDecoder()
-  global_params = model_def.GlobalParams(
-      batch_norm_momentum=0.99,
-      batch_norm_epsilon=1e-3,
-      dropout_rate=0.2,
-      data_format='channels_last',
-      num_classes=1000,
-      depth_multiplier=None,
-      depth_divisor=8,
-      expratio=e,
-      kernel=k,
-      min_depth=None)
-  return decoder.decode(blocks_args), global_params
 
-
-def build_mnasnet_model(images, model_name, training, override_params=None):
-  """A helper functiion to creates a ConvNet MnasNet-based model and returns predicted logits.
+def build_model(images, model_name, training, override_params=None,
+        parse_output_dir=None):
+  """A helper functiion to creates a ConvNet model and returns predicted logits.
 
   Args:
     images: input images tensor.
@@ -175,10 +164,9 @@ def build_mnasnet_model(images, model_name, training, override_params=None):
     When override_params has invalid fields, raises ValueError.
   """
   assert isinstance(images, tf.Tensor)
-  if model_name == 'mnasnet-backbone':
-    kernel = int(override_params['kernel'])
-    expratio = int(override_params['expratio'])
-    blocks_args, global_params = mnasnet_backbone(kernel, expratio)
+  if model_name == 'single-path':
+    assert parse_output_dir is not None
+    blocks_args, global_params = parse_netarch(parse_output_dir)
   else:
     raise NotImplementedError('model name is not pre-defined: %s' % model_name)
 

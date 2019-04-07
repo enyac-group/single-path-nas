@@ -192,13 +192,13 @@ def plot_progress(runtimes, ce_loss):
   plt.savefig("progress_ce.png")
   plt.close()
 
-  return True
+
 
 import os, sys
 if __name__ == '__main__':
 
-  if len(sys.argv) != 3:
-    print("Argument: {Bucket-path} {log-action}")
+  if len(sys.argv) != 2:
+    print("Argument: {Bucket-path}")
     exit()
   
   log_file = sys.argv[1] 
@@ -210,20 +210,12 @@ if __name__ == '__main__':
         'histograms': 1
   }
 
-  log_type = sys.argv[2]
-
-  if log_type == 'progress':
-    runtimes, ce_loss = parse_progress(log_file, tf_size_guidance)
-    _ = plot_progress(runtimes, ce_loss)
-  elif log_type == 'netarch':
-    indicator_values = parse_indicators_single_path_nas(log_file, tf_size_guidance)
-    network = encode_single_path_nas_arch(indicator_values)
-    print("Net decisions (MBConv) per layer")
-    print_net(network)
-    print("MnasNet-like TPU compatible encoding")
-    block_args = convnet_encoder(network)
-    print_encoded_net(block_args)
-  else:
-    print("Not supported log action")
+  indicator_values = parse_indicators_single_path_nas(log_file, tf_size_guidance)
+  network = encode_single_path_nas_arch(indicator_values)
+  print("Net decisions (MBConv) per layer")
+  print_net(network)
+  print("MnasNet-like TPU compatible encoding")
+  block_args = convnet_encoder(network)
+  print_encoded_net(block_args)
 
 

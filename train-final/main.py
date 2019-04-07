@@ -6,9 +6,7 @@
 # This project incorporates material from the project listed above, and it
 # is accessible under their original license terms (Apache License 2.0)
 # ==============================================================================
-"""Generate MobileNet-based ConvNet backbones with different
-   MBConv values (kernel size, expansion ratio) to train LUT 
-   runtime model."""
+"""Train the found ConvNet on ImageNet on TPU."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -70,7 +68,7 @@ flags.DEFINE_string(
 
 flags.DEFINE_string(
     'model_name',
-    default='mnasnet-backbone',
+    default='single-path',
     help=(
         'The model name to select models among existing MnasNet configurations.'
     ))
@@ -80,7 +78,7 @@ flags.DEFINE_string(
     help='One of {"train_and_eval", "train", "eval"}.')
 
 flags.DEFINE_integer(
-    'train_steps', default=1,
+    'train_steps', default=437898, 
     help=('The number of steps to use for training. Default is 437898 steps'
           ' which is approximately 350 epochs at batch size 1024. This flag'
           ' should be adjusted according to the --train_batch_size flag.'))
@@ -101,7 +99,7 @@ flags.DEFINE_integer(
     'num_eval_images', default=50000, help='Size of evaluation data set.')
 
 flags.DEFINE_integer(
-    'steps_per_eval', default=6255,
+    'steps_per_eval', default=18765,
     help=('Controls how often evaluation is performed. Since evaluation is'
           ' fairly expensive, it is advised to evaluate as infrequently as'
           ' possible (i.e. up to --train_steps, which evaluates the model only'
@@ -221,14 +219,6 @@ flags.DEFINE_bool(
 flags.DEFINE_float(
     'depth_multiplier', default=None, help=('Depth multiplier per layer.'))
 
-
-flags.DEFINE_float(
-    'kernel', default=None, help=('Kernel size for net (default to 3).'))
-
-flags.DEFINE_float(
-    'expratio', default=None, help=('Exp ratio (default to 6).'))
-
-
 flags.DEFINE_float(
     'depth_divisor', default=None, help=('Depth divisor (default to 8).'))
 
@@ -237,6 +227,11 @@ flags.DEFINE_float(
 
 flags.DEFINE_bool(
     'use_async_checkpointing', default=False, help=('Enable async checkpoint'))
+
+flags.DEFINE_string(
+    'parse_search_dir',
+    default=None,
+    help=('The directory where the output of SP-NAS search is stored.'))
 
 # Learning rate schedule
 LR_SCHEDULE = [    # (multiplier, epoch to start) tuples
@@ -249,8 +244,9 @@ MEAN_RGB = [0.485 * 255, 0.456 * 255, 0.406 * 255]
 STDDEV_RGB = [0.229 * 255, 0.224 * 255, 0.225 * 255]
 
 
-def gen_model_fn(features, labels, mode, params):
-  """The model_fn for MnasNet to be used with TPUEstimator.
+def final_model_fn(features, labels, mode, params):
+  """The model_fn for ConvNet found by Single-Path NAS to 
+     be used with TPUEstimator.
 
   Args:
     features: `Tensor` of batched images.
@@ -299,10 +295,6 @@ def gen_model_fn(features, labels, mode, params):
     override_params['num_classes'] = FLAGS.num_label_classes
   if FLAGS.depth_multiplier:
     override_params['depth_multiplier'] = FLAGS.depth_multiplier
-  if FLAGS.kernel:
-    override_params['kernel'] = FLAGS.kernel
-  if FLAGS.expratio:
-    override_params['expratio'] = FLAGS.expratio
   if FLAGS.depth_divisor:
     override_params['depth_divisor'] = FLAGS.depth_divisor
   if FLAGS.min_depth:
@@ -312,7 +304,8 @@ def gen_model_fn(features, labels, mode, params):
       features,
       model_name=FLAGS.model_name,
       training=is_training,
-      override_params=override_params)
+      override_params=override_params,
+      parse_search_dir=FLAGS.parse_search_dir)
 
   if mode == tf.estimator.ModeKeys.PREDICT:
     predictions = {
@@ -560,7 +553,7 @@ def export(est, export_dir, post_quantize=True):
       serving_input_receiver_fn=image_serving_input_fn)
 
   tf.logging.info('Starting to export TFLite.')
-  converter = tf.contrib.lite.TFLiteConverter.from_saved_model(
+  converter = tf.lite.TFLiteConverter.from_saved_model(
       os.path.join(export_dir, subfolder),
       input_arrays=['truediv'],
       output_arrays=['logits'])
@@ -570,7 +563,7 @@ def export(est, export_dir, post_quantize=True):
 
   if post_quantize:
     tf.logging.info('Starting to export quantized TFLite.')
-    converter = tf.contrib.lite.TFLiteConverter.from_saved_model(
+    converter = tf.lite.TFLiteConverter.from_saved_model(
         os.path.join(export_dir, subfolder),
         input_arrays=['truediv'],
         output_arrays=['logits'])
@@ -608,7 +601,7 @@ def main(unused_argv):
   params = dict(steps_per_epoch=FLAGS.num_train_images / FLAGS.train_batch_size)
   model_est = tf.contrib.tpu.TPUEstimator(
       use_tpu=FLAGS.use_tpu,
-      model_fn=gen_model_fn,
+      model_fn=final_model_fn,
       config=config,
       train_batch_size=FLAGS.train_batch_size,
       eval_batch_size=FLAGS.eval_batch_size,
@@ -697,9 +690,6 @@ def main(unused_argv):
           input_fn=imagenet_train.input_fn,
           max_steps=FLAGS.train_steps,
           hooks=hooks)
-
-      if FLAGS.export_dir:
-        export(model_est, FLAGS.export_dir, FLAGS.post_quantize)
 
     else:
       assert FLAGS.mode == 'train_and_eval'

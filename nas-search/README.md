@@ -6,14 +6,18 @@ To find a hardware-efficient ConvNet, launch a NAS search for different lambda
 
 ### Specific steps
 
-1. Setting up TPU-related ENV variables:
+1. Setting up ImageNet dataset
+
+To setup the ImageNet follow the instructions from [here](https://cloud.google.com/tpu/docs/tutorials/amoebanet#full-dataset)  
+
+2. Setting up TPU-related ENV variables:
 ```
 export STORAGE_BUCKET=gs://{your-bucket-name-here} 
 export DATA_DIR=${STORAGE_BUCKET}/{imagenet-dataset-location}
 export OUTPUT_DIR=${STORAGE_BUCKET}/model-single-path-search
 export TPU_NAME=node-{your-tpu-name}
 ```
-2. Launch NAS search:
+3. Launch NAS search:
 ```
 lambda_val=0.020; python search_main.py --tpu=$TPU_NAME --data_dir=$DATA_DIR --model_dir=${OUTPUT_DIR}/lambda-val-${lambda_val}/ --runtime_lambda_val=${lambda_val} 
 ```
@@ -45,8 +49,7 @@ cd ./plot-progress/
 lambda_val=0.020; python parse_search_output.py ${OUTPUT_DIR}/lambda-val-${lambda_val}/ progress
 cd ..
 ```
-The flow of benchmarking is illustrated in the following figure:
-
+The output of the script is the following:
 ![Runtime progress](/nas-search/plot-progress/spnas_progress_runtime.png)
 ![CE Loss progress](/nas-search/plot-progress/spnas_progress_ce.png)
 
