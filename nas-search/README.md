@@ -47,8 +47,8 @@ cd ..
 ```
 The flow of benchmarking is illustrated in the following figure:
 
-![Runtime progress](/nas-search/spnas_progress_runtime.png)
-![CE Loss progress](/nas-search/spnas_progress_ce.png)
+![Runtime progress](/nas-search/plot-progress/spnas_progress_runtime.png)
+![CE Loss progress](/nas-search/plot-progress/spnas_progress_ce.png)
 
 
 
