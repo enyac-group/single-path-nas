@@ -6,7 +6,7 @@
 # This project incorporates material from the project listed above, and it
 # is accessible under their original license terms (Apache License 2.0)
 # ==============================================================================
-""" Search space SuperNet definition (follows MobileNet-like space)."""
+"""Creates the MNasNet-based macro-arch backbone."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -14,14 +14,15 @@ from __future__ import print_function
 
 import re
 import tensorflow as tf
-import singlepath_supernet
+
+import model_def
 
 
-class MBConvDecoder(object):
-  """A class of decoder to get model configuration."""
+class MnasNetDecoder(object):
+  """A class of MnasNet decoder to get model configuration."""
 
   def _decode_block_string(self, block_string):
-    """Gets a block through a string notation of arguments.
+    """Gets a MNasNet block through a string notation of arguments.
 
     E.g. r2_k3_s2_e1_i32_o16_se0.25_noskip: r - number of repeat blocks,
     k - kernel size, s - strides (1-9), e - expansion ratio, i - input filters,
@@ -47,7 +48,7 @@ class MBConvDecoder(object):
     if 's' not in options or len(options['s']) != 2:
       raise ValueError('Strides options should be a pair of integers.')
 
-    return singlepath_supernet.BlockArgs(
+    return model_def.BlockArgs(
         kernel_size=int(options['k']),
         num_repeat=int(options['r']),
         input_filters=int(options['i']),
@@ -58,7 +59,7 @@ class MBConvDecoder(object):
         strides=[int(options['s'][0]), int(options['s'][1])])
 
   def _encode_block_string(self, block):
-    """Encodes a block to a string."""
+    """Encodes a MnasNet block to a string."""
     args = [
         'r%d' % block.num_repeat,
         'k%d' % block.kernel_size,
@@ -77,10 +78,11 @@ class MBConvDecoder(object):
     """Decodes a list of string notations to specify blocks inside the network.
 
     Args:
-      string_list: a list of strings, each string is a notation of a block.
+      string_list: a list of strings, each string is a notation of MnasNet
+        block.
 
     Returns:
-      A list of namedtuples to represent MnasNet-based blocks arguments.
+      A list of namedtuples to represent MnasNet blocks arguments.
     """
     assert isinstance(string_list, list)
     blocks_args = []
@@ -89,12 +91,12 @@ class MBConvDecoder(object):
     return blocks_args
 
   def encode(self, blocks_args):
-    """Encodes a list of MnasNet-based Blocks to a list of strings.
+    """Encodes a list of MnasNet Blocks to a list of strings.
 
     Args:
-      blocks_args: A list of namedtuples to represent blocks arguments.
+      blocks_args: A list of namedtuples to represent MnasNet blocks arguments.
     Returns:
-      a list of strings, each string is a notation of block.
+      a list of strings, each string is a notation of MnasNet block.
     """
     block_strings = []
     for block in blocks_args:
@@ -102,34 +104,20 @@ class MBConvDecoder(object):
     return block_strings
 
 
-def single_path_search(depth_multiplier=None):
-  """Creates a single-path supermodel for search:
-     See Fig.2 in paper:
-       -- 1st and last blocks have 1 MBConv set
-       -- The rest 20 blocks have 4 MBConv searchable layers
-
-  Args:
-    depth_multiplier: multiplier to number of filters per layer.
-
-  Returns:
-    blocks_args: a list of BlocksArgs for internal MnasNet blocks.
-    global_params: GlobalParams, global parameters for the model.
+def mnasnet_3x3_1(depth_multiplier=None):
+  """Creates a mnasnet-3x3-1.
   """
-  # our supermodel "starting point", where kernels are set to max
-  # 5x5 and expansion ratios to 6. Filter sizes are set to MNasNet
-  # defaults
-
   blocks_args = [
       'r1_k3_s11_e1_i32_o16_noskip', 
-      'r4_k5_s22_e6_i16_o24',
-      'r4_k5_s22_e6_i24_o40', 
-      'r4_k5_s22_e6_i40_o80',
-      'r4_k5_s11_e6_i80_o96', 
-      'r4_k5_s22_e6_i96_o192',
+      'r4_k3_s22_e1_i16_o24',
+      'r4_k3_s22_e1_i24_o40', 
+      'r4_k3_s22_e1_i40_o80', 
+      'r4_k3_s11_e1_i80_o96',
+      'r4_k3_s22_e1_i96_o192', 
       'r1_k3_s11_e6_i192_o320_noskip'
   ]
-
-  global_params = singlepath_supernet.GlobalParams(
+  decoder = MnasNetDecoder()
+  global_params = model_def.GlobalParams(
       batch_norm_momentum=0.99,
       batch_norm_epsilon=1e-3,
       dropout_rate=0.2,
@@ -137,33 +125,59 @@ def single_path_search(depth_multiplier=None):
       num_classes=1000,
       depth_multiplier=depth_multiplier,
       depth_divisor=8,
-      min_depth=None,
-      search_space='mnasnet')
-  decoder = MBConvDecoder()
+      min_depth=None)
   return decoder.decode(blocks_args), global_params
 
 
-def build_supernet(images, model_name, training, override_params=None, dropout_rate=None):
-  """A helper function to creates the NAS Supernet and returns predicted logits.
+def mnasnet_backbone(k, e):
+  """Creates a mnasnet-3x3-3 model.
+  """
+  blocks_args = [
+      'r1_k3_s11_e1_i32_o16_noskip', 
+      'r4_k'+str(k)+'_s22_e'+str(e)+'_i16_o24',
+      'r4_k'+str(k)+'_s22_e'+str(e)+'_i24_o40', 
+      'r4_k'+str(k)+'_s22_e'+str(e)+'_i40_o80', 
+      'r4_k'+str(k)+'_s11_e'+str(e)+'_i80_o96',
+      'r4_k'+str(k)+'_s22_e'+str(e)+'_i96_o192', 
+      'r1_k3_s11_e6_i192_o320_noskip'
+  ]
+  decoder = MnasNetDecoder()
+  global_params = model_def.GlobalParams(
+      batch_norm_momentum=0.99,
+      batch_norm_epsilon=1e-3,
+      dropout_rate=0.2,
+      data_format='channels_last',
+      num_classes=1000,
+      depth_multiplier=None,
+      depth_divisor=8,
+      expratio=e,
+      kernel=k,
+      min_depth=None)
+  return decoder.decode(blocks_args), global_params
+
+
+def build_mnasnet_model(images, model_name, training, override_params=None):
+  """A helper functiion to creates a MnasNet model and returns predicted logits.
 
   Args:
     images: input images tensor.
-    model_name: string, the model name
+    model_name: string, the model name of a pre-defined MnasNet.
     training: boolean, whether the model is constructed for training.
     override_params: A dictionary of params for overriding. Fields must exist in
-      singlepath_supernet.GlobalParams.
+      model_def.GlobalParams.
 
   Returns:
     logits: the logits tensor of classes.
-    runtime: the total runtime based on the threshold decisions
     endpoints: the endpoints for each layer.
   Raises:
     When model_name specified an undefined model, raises NotImplementedError.
     When override_params has invalid fields, raises ValueError.
   """
   assert isinstance(images, tf.Tensor)
-  if model_name == 'single-path-search':
-    blocks_args, global_params = single_path_search()
+  if model_name == 'mnasnet-backbone':
+    kernel = int(override_params['kernel'])
+    expratio = int(override_params['expratio'])
+    blocks_args, global_params = mnasnet_backbone(kernel, expratio)
   else:
     raise NotImplementedError('model name is not pre-defined: %s' % model_name)
 
@@ -173,8 +187,8 @@ def build_supernet(images, model_name, training, override_params=None, dropout_r
     global_params = global_params._replace(**override_params)
 
   with tf.variable_scope(model_name):
-    model = singlepath_supernet.SinglePathSuperNet(blocks_args, global_params, dropout_rate)
-    logits, total_runtime = model(images, training=training)
+    model = model_def.MnasNetModel(blocks_args, global_params)
+    logits = model(images, training=training)
 
   logits = tf.identity(logits, 'logits')
-  return logits, total_runtime, model.indicators
+  return logits, model.endpoints

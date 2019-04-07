@@ -1,3 +1,5 @@
+# authors: dstamoulis, ruizhoud
+#
 # Code extends codebase from the "MNasNet on TPU" GitHub repo:
 # https://github.com/tensorflow/tpu/tree/master/models/official/mnasnet
 #

@@ -6,7 +6,9 @@
 # This project incorporates material from the project listed above, and it
 # is accessible under their original license terms (Apache License 2.0)
 # ==============================================================================
-"""Search ConvNets with Single-Path NAS."""
+"""Generate MobileNet-based ConvNet backbones with different
+   MBConv values (kernel size, expansion ratio) to train LUT 
+   runtime model."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -20,8 +22,8 @@ import numpy as np
 import tensorflow as tf
 
 import imagenet_input
-import supernet_macro
-import nas_utils
+import models
+import utils
 from tensorflow.contrib.tpu.python.tpu import async_checkpoint
 from tensorflow.contrib.training.python.training import evaluation
 from tensorflow.core.protobuf import rewriter_config_pb2
@@ -30,6 +32,7 @@ from tensorflow.python.keras import backend as K
 
 
 FLAGS = flags.FLAGS
+
 FAKE_DATA_DIR = 'gs://cloud-tpu-test-datasets/fake_imagenet'
 
 flags.DEFINE_bool(
@@ -67,10 +70,9 @@ flags.DEFINE_string(
 
 flags.DEFINE_string(
     'model_name',
-    default='single-path-search',
+    default='mnasnet-backbone',
     help=(
-        'The model name to select models among existing MobileNet-like search spaces'
-        'single-path-search: 3x3-3, 3x3-6, 5x5-3, 5x5-6.'
+        'The model name to select models among existing MnasNet configurations.'
     ))
 
 flags.DEFINE_string(
@@ -78,9 +80,10 @@ flags.DEFINE_string(
     help='One of {"train_and_eval", "train", "eval"}.')
 
 flags.DEFINE_integer(
-    'train_steps', default=10008,
-    help=('The number of steps to use for search. Default is 10008'
-          ' with batch size 1024 and with warmup steps 6255'))
+    'train_steps', default=1,
+    help=('The number of steps to use for training. Default is 437898 steps'
+          ' which is approximately 350 epochs at batch size 1024. This flag'
+          ' should be adjusted according to the --train_batch_size flag.'))
 
 flags.DEFINE_integer(
     'input_image_size', default=224, help='Input image size.')
@@ -98,7 +101,7 @@ flags.DEFINE_integer(
     'num_eval_images', default=50000, help='Size of evaluation data set.')
 
 flags.DEFINE_integer(
-    'steps_per_eval', default=12000,
+    'steps_per_eval', default=6255,
     help=('Controls how often evaluation is performed. Since evaluation is'
           ' fairly expensive, it is advised to evaluate as infrequently as'
           ' possible (i.e. up to --train_steps, which evaluates the model only'
@@ -218,6 +221,14 @@ flags.DEFINE_bool(
 flags.DEFINE_float(
     'depth_multiplier', default=None, help=('Depth multiplier per layer.'))
 
+
+flags.DEFINE_float(
+    'kernel', default=None, help=('Kernel size for net (default to 3).'))
+
+flags.DEFINE_float(
+    'expratio', default=None, help=('Exp ratio (default to 6).'))
+
+
 flags.DEFINE_float(
     'depth_divisor', default=None, help=('Depth divisor (default to 8).'))
 
@@ -226,10 +237,6 @@ flags.DEFINE_float(
 
 flags.DEFINE_bool(
     'use_async_checkpointing', default=False, help=('Enable async checkpoint'))
-
-flags.DEFINE_float(
-    'runtime_lambda_val', default=0.1,
-    help=('Lambda val for trading off loss and runtime'))
 
 # Learning rate schedule
 LR_SCHEDULE = [    # (multiplier, epoch to start) tuples
@@ -242,8 +249,8 @@ MEAN_RGB = [0.485 * 255, 0.456 * 255, 0.406 * 255]
 STDDEV_RGB = [0.229 * 255, 0.224 * 255, 0.225 * 255]
 
 
-def nas_model_fn(features, labels, mode, params):
-  """The model_fn for TPUEstimator-based NAS search
+def mnasnet_model_fn(features, labels, mode, params):
+  """The model_fn for MnasNet to be used with TPUEstimator.
 
   Args:
     features: `Tensor` of batched images.
@@ -278,7 +285,7 @@ def nas_model_fn(features, labels, mode, params):
   has_moving_average_decay = (FLAGS.moving_average_decay > 0)
   # This is essential, if using a keras-derived model.
   K.set_learning_phase(is_training)
-  tf.logging.info('Using open-source implementation for NAS definition.')
+  tf.logging.info('Using open-source implementation for MnasNet definition.')
   override_params = {}
   if FLAGS.batch_norm_momentum:
     override_params['batch_norm_momentum'] = FLAGS.batch_norm_momentum
@@ -292,22 +299,20 @@ def nas_model_fn(features, labels, mode, params):
     override_params['num_classes'] = FLAGS.num_label_classes
   if FLAGS.depth_multiplier:
     override_params['depth_multiplier'] = FLAGS.depth_multiplier
+  if FLAGS.kernel:
+    override_params['kernel'] = FLAGS.kernel
+  if FLAGS.expratio:
+    override_params['expratio'] = FLAGS.expratio
   if FLAGS.depth_divisor:
     override_params['depth_divisor'] = FLAGS.depth_divisor
   if FLAGS.min_depth:
     override_params['min_depth'] = FLAGS.min_depth
 
-
-  global_step = tf.train.get_global_step()
-  warmup_steps = 6255
-  dropout_rate = nas_utils.build_dropout_rate(global_step, warmup_steps)
-
-  logits, runtime_val, indicators = supernet_macro.build_supernet(
+  logits, _ = models.build_model(
       features,
       model_name=FLAGS.model_name,
       training=is_training,
-      override_params=override_params, 
-      dropout_rate=dropout_rate)
+      override_params=override_params)
 
   if mode == tf.estimator.ModeKeys.PREDICT:
     predictions = {
@@ -332,23 +337,12 @@ def nas_model_fn(features, labels, mode, params):
       onehot_labels=one_hot_labels,
       label_smoothing=FLAGS.label_smoothing)
 
-
-  runtime_lambda = nas_utils.build_runtime_lambda(global_step, 
-                        warmup_steps, FLAGS.runtime_lambda_val)
-  runtime_loss = runtime_lambda * 1e3 * tf.log(runtime_val)  # 1e3 to sec
-
-  # dstamoulis NOTE: No reshaping led to crashing:
-  # ValueError: Cannot reshape a tensor with 2 elements to shape [1] 
-  # (1 elements) for 'Reshape_1' (op: 'Reshape') with input shapes: [2], [1] 
-  # and with input tensors computed as partial shapes: input[1] = [1].  # 
-  # --> solution: matching size, so that trainin_loop while does not complain
-  runtime_loss = tf.reshape(runtime_loss, shape=cross_entropy.shape)
-
   # Add weight decay to the loss for non-batch-normalization variables.
   loss = cross_entropy + FLAGS.weight_decay * tf.add_n(
       [tf.nn.l2_loss(v) for v in tf.trainable_variables()
-       if 'batch_normalization' not in v.name]) + runtime_loss 
+       if 'batch_normalization' not in v.name])
 
+  global_step = tf.train.get_global_step()
   if has_moving_average_decay:
     ema = tf.train.ExponentialMovingAverage(
         decay=FLAGS.moving_average_decay, num_updates=global_step)
@@ -359,7 +353,6 @@ def nas_model_fn(features, labels, mode, params):
         ema_vars.append(v)
     ema_vars = list(set(ema_vars))
 
-
   host_call = None
   restore_vars_dict = None
   if is_training:
@@ -368,12 +361,9 @@ def nas_model_fn(features, labels, mode, params):
         tf.cast(global_step, tf.float32) / params['steps_per_epoch'])
 
     scaled_lr = FLAGS.base_learning_rate * (FLAGS.train_batch_size / 256.0)
-
-    # NOTE: dstamoulis -- cancelled out warm-up epochs with -1!!
-    learning_rate = nas_utils.build_learning_rate(scaled_lr, global_step,
-                                                      params['steps_per_epoch'],
-                                                      warmup_epochs=-1)
-    optimizer = nas_utils.build_optimizer(learning_rate)
+    learning_rate = utils.build_learning_rate(scaled_lr, global_step,
+                                                      params['steps_per_epoch'])
+    optimizer = utils.build_optimizer(learning_rate)
     if FLAGS.use_tpu:
       # When using TPU, wrap the optimizer with CrossShardOptimizer which
       # handles synchronization details between different TPU cores. To the
@@ -391,17 +381,7 @@ def nas_model_fn(features, labels, mode, params):
         train_op = ema.apply(ema_vars)
 
     if not FLAGS.skip_host_call:
-      def host_call_fn(gs, loss, lr, runtime, 
-              t5x5_1, t50c_1, t100c_1, t5x5_2, t50c_2, t100c_2, 
-              t5x5_3, t50c_3, t100c_3, t5x5_4, t50c_4, t100c_4, 
-              t5x5_5, t50c_5, t100c_5, t5x5_6, t50c_6, t100c_6, 
-              t5x5_7, t50c_7, t100c_7, t5x5_8, t50c_8, t100c_8, 
-              t5x5_9, t50c_9, t100c_9, t5x5_10, t50c_10, t100c_10, 
-              t5x5_11, t50c_11, t100c_11, t5x5_12, t50c_12, t100c_12, 
-              t5x5_13, t50c_13, t100c_13, t5x5_14, t50c_14, t100c_14, 
-              t5x5_15, t50c_15, t100c_15, t5x5_16, t50c_16, t100c_16, 
-              t5x5_17, t50c_17, t100c_17, t5x5_18, t50c_18, t100c_18, 
-              t5x5_19, t50c_19, t100c_19, t5x5_20, t50c_20, t100c_20):
+      def host_call_fn(gs, loss, lr, ce):
         """Training host call. Creates scalar summaries for training metrics.
 
         This function is executed on the CPU and should not directly reference
@@ -423,18 +403,6 @@ def nas_model_fn(features, labels, mode, params):
           List of summary ops to run on the CPU host.
         """
         gs = gs[0]
-
-        t_list = [[t5x5_1, t50c_1, t100c_1], [t5x5_2, t50c_2, t100c_2], 
-              [t5x5_3, t50c_3, t100c_3], [t5x5_4, t50c_4, t100c_4], 
-              [t5x5_5, t50c_5, t100c_5], [t5x5_6, t50c_6, t100c_6], 
-              [t5x5_7, t50c_7, t100c_7], [t5x5_8, t50c_8, t100c_8], 
-              [t5x5_9, t50c_9, t100c_9], [t5x5_10, t50c_10, t100c_10], 
-              [t5x5_11, t50c_11, t100c_11], [t5x5_12, t50c_12, t100c_12], 
-              [t5x5_13, t50c_13, t100c_13], [t5x5_14, t50c_14, t100c_14], 
-              [t5x5_15, t50c_15, t100c_15], [t5x5_16, t50c_16, t100c_16], 
-              [t5x5_17, t50c_17, t100c_17], [t5x5_18, t50c_18, t100c_18], 
-              [t5x5_19, t50c_19, t100c_19], [t5x5_20, t50c_20, t100c_20]]
-
         # Host call fns are executed FLAGS.iterations_per_loop times after one
         # TPU loop is finished, setting max_queue value to the same as number of
         # iterations will make the summary writer only flush the data to storage
@@ -444,36 +412,21 @@ def nas_model_fn(features, labels, mode, params):
           with tf.contrib.summary.always_record_summaries():
             tf.contrib.summary.scalar('loss', loss[0], step=gs)
             tf.contrib.summary.scalar('learning_rate', lr[0], step=gs)
-            #tf.contrib.summary.scalar('current_epoch', ce[0], step=gs)
-            tf.contrib.summary.scalar('runtime_ms', runtime[0], step=gs)
-            for idx, t_ in enumerate(t_list):
-              for label_, t_tensor in zip(['t5x5_','t50c_','t100c_'], t_):
-                sum_label_ = label_ + str(idx+1) 
-                tf.contrib.summary.scalar(sum_label_, t_tensor[0], step=gs)
+            tf.contrib.summary.scalar('current_epoch', ce[0], step=gs)
 
             return tf.contrib.summary.all_summary_ops()
-
 
       # To log the loss, current learning rate, and epoch for Tensorboard, the
       # summary op needs to be run on the host CPU via host_call. host_call
       # expects [batch_size, ...] Tensors, thus reshape to introduce a batch
-      # dimension. These Tensors are implicitly concatenated to [params['batch_size']].
+      # dimension. These Tensors are implicitly concatenated to
+      # [params['batch_size']].
       gs_t = tf.reshape(global_step, [1])
-      loss_t = tf.reshape(cross_entropy, [1])
+      loss_t = tf.reshape(loss, [1])
       lr_t = tf.reshape(learning_rate, [1])
-      runtime_t = tf.reshape(runtime_val, [1])
+      ce_t = tf.reshape(current_epoch, [1])
 
-      # Single-Path additions: get the threshold decisions per design space
-      t_list = []
-      decision_labels = ['d5x5','d50c','d100c']
-      t_list = []
-      for idx in range(20): 
-        key_ = 'block_' + str(idx+1)
-        for decision_label in decision_labels:
-          v = indicators[key_][decision_label]
-          t_list.append(tf.reshape(v, [1]))
-
-      host_call = (host_call_fn, [gs_t, loss_t, lr_t, runtime_t] + t_list)
+      host_call = (host_call_fn, [gs_t, loss_t, lr_t, ce_t])
 
   else:
     train_op = None
@@ -598,20 +551,16 @@ def export(est, export_dir, post_quantize=True):
     raise ValueError('The export directory path is not specified.')
   # The guide to serve a exported TensorFlow model is at:
   #    https://www.tensorflow.org/serving/serving_basic
-  def lite_image_serving_input_fn():
-    """serving input fn for raw images."""
-    input_shape = [1, FLAGS.input_image_size, FLAGS.input_image_size, 3]
-    images = tf.placeholder(shape=input_shape, dtype=tf.float32)
-    return tf.estimator.export.ServingInputReceiver(images, {'images': images})
+  image_serving_input_fn = imagenet_input.build_image_serving_input_fn(
+      FLAGS.input_image_size)
 
   tf.logging.info('Starting to export model.')
-  est.export_saved_model(
+  subfolder = est.export_saved_model(
       export_dir_base=export_dir,
-      serving_input_receiver_fn=lite_image_serving_input_fn)
+      serving_input_receiver_fn=image_serving_input_fn)
 
-  subfolder = sorted(tf.gfile.ListDirectory(export_dir), reverse=True)[0]
   tf.logging.info('Starting to export TFLite.')
-  converter = tf.lite.TFLiteConverter.from_saved_model(
+  converter = tf.contrib.lite.TFLiteConverter.from_saved_model(
       os.path.join(export_dir, subfolder),
       input_arrays=['truediv'],
       output_arrays=['logits'])
@@ -621,7 +570,7 @@ def export(est, export_dir, post_quantize=True):
 
   if post_quantize:
     tf.logging.info('Starting to export quantized TFLite.')
-    converter = tf.lite.TFLiteConverter.from_saved_model(
+    converter = tf.contrib.lite.TFLiteConverter.from_saved_model(
         os.path.join(export_dir, subfolder),
         input_arrays=['truediv'],
         output_arrays=['logits'])
@@ -657,9 +606,9 @@ def main(unused_argv):
           .PER_HOST_V2))  # pylint: disable=line-too-long
   # Initializes model parameters.
   params = dict(steps_per_epoch=FLAGS.num_train_images / FLAGS.train_batch_size)
-  nas_est = tf.contrib.tpu.TPUEstimator(
+  mnasnet_est = tf.contrib.tpu.TPUEstimator(
       use_tpu=FLAGS.use_tpu,
-      model_fn=nas_model_fn,
+      model_fn=mnasnet_model_fn,
       config=config,
       train_batch_size=FLAGS.train_batch_size,
       eval_batch_size=FLAGS.eval_batch_size,
@@ -702,7 +651,7 @@ def main(unused_argv):
       tf.logging.info('Starting to evaluate.')
       try:
         start_timestamp = time.time()  # This time will include compilation time
-        eval_results = nas_est.evaluate(
+        eval_results = mnasnet_est.evaluate(
             input_fn=imagenet_eval.input_fn,
             steps=eval_steps,
             checkpoint_path=ckpt)
@@ -726,7 +675,7 @@ def main(unused_argv):
             'Checkpoint %s no longer exists, skipping checkpoint', ckpt)
 
     if FLAGS.export_dir:
-      export(nas_est, FLAGS.export_dir, FLAGS.post_quantize)
+      export(mnasnet_est, FLAGS.export_dir, FLAGS.post_quantize)
   else:   # FLAGS.mode == 'train' or FLAGS.mode == 'train_and_eval'
     current_step = estimator._load_global_step_from_checkpoint_dir(FLAGS.model_dir)  # pylint: disable=protected-access,line-too-long
 
@@ -744,10 +693,13 @@ def main(unused_argv):
             async_checkpoint.AsyncCheckpointSaverHook(
                 checkpoint_dir=FLAGS.model_dir,
                 save_steps=max(100, FLAGS.iterations_per_loop)))
-      nas_est.train(
+      mnasnet_est.train(
           input_fn=imagenet_train.input_fn,
           max_steps=FLAGS.train_steps,
           hooks=hooks)
+
+      if FLAGS.export_dir:
+        export(mnasnet_est, FLAGS.export_dir, FLAGS.post_quantize)
 
     else:
       assert FLAGS.mode == 'train_and_eval'
@@ -756,7 +708,7 @@ def main(unused_argv):
         # At the end of training, a checkpoint will be written to --model_dir.
         next_checkpoint = min(current_step + FLAGS.steps_per_eval,
                               FLAGS.train_steps)
-        nas_est.train(
+        mnasnet_est.train(
             input_fn=imagenet_train.input_fn, max_steps=next_checkpoint)
         current_step = next_checkpoint
 
@@ -768,7 +720,7 @@ def main(unused_argv):
         # may be excluded modulo the batch size. As long as the batch size is
         # consistent, the evaluated images are also consistent.
         tf.logging.info('Starting to evaluate.')
-        eval_results = nas_est.evaluate(
+        eval_results = mnasnet_est.evaluate(
             input_fn=imagenet_eval.input_fn,
             steps=FLAGS.num_eval_images // FLAGS.eval_batch_size)
         tf.logging.info('Eval results at step %d: %s',
@@ -778,7 +730,7 @@ def main(unused_argv):
       tf.logging.info('Finished training up to step %d. Elapsed seconds %d.',
                       FLAGS.train_steps, elapsed_time)
       if FLAGS.export_dir:
-        export(nas_est, FLAGS.export_dir, FLAGS.post_quantize)
+        export(mnasnet_est, FLAGS.export_dir, FLAGS.post_quantize)
 
 
 if __name__ == '__main__':

@@ -45,5 +45,10 @@ cd ./plot-progress/
 lambda_val=0.020; python parse_search_output.py ${OUTPUT_DIR}/lambda-val-${lambda_val}/ progress
 cd ..
 ```
+The flow of benchmarking is illustrated in the following figure:
+
+![Runtime progress](/nas-search/spnas_progress_runtime.png)
+![CE Loss progress](/nas-search/spnas_progress_ce.png)
+
 
 

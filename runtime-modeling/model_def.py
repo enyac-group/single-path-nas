@@ -6,12 +6,7 @@
 # This project incorporates material from the project listed above, and it
 # is accessible under their original license terms (Apache License 2.0)
 # ==============================================================================
-"""Contains the supernet definition based on the Single-Path
-   search space formulation.
-
-[1] D. Stamoulis et al., Single-Path NAS: Designing Hardware-Efficient 
-    ConvNets in less than 4 Hours. arXiv:(TBD)
-"""
+"""Defines MNasNet-based micro-arch model based on given MBConv params."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -22,16 +17,13 @@ import numpy as np
 import six
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
-import json
-
-# dstamoulis: definition of masked layer (DepthwiseConv2DMasked)
-from superkernel import *
 
 GlobalParams = collections.namedtuple('GlobalParams', [
     'batch_norm_momentum', 'batch_norm_epsilon', 'dropout_rate', 'data_format',
-    'num_classes', 'depth_multiplier', 'depth_divisor', 'min_depth', 'search_space',
+    'num_classes', 'depth_multiplier', 'depth_divisor', 'min_depth', 'kernel', 'expratio'
 ])
 GlobalParams.__new__.__defaults__ = (None,) * len(GlobalParams._fields)
+
 
 # TODO(hongkuny): Consider rewrite an argument class with encoding/decoding.
 BlockArgs = collections.namedtuple('BlockArgs', [
@@ -91,6 +83,10 @@ def dense_kernel_initializer(shape, dtype=None, partition_info=None):
 def round_filters(filters, global_params):
   """Round number of filters based on depth multiplier."""
   multiplier = global_params.depth_multiplier
+  # dstam addition
+  if multiplier > 10:
+    multiplier = float(multiplier) / 100
+
   divisor = global_params.depth_divisor
   min_depth = global_params.min_depth
   if not multiplier:
@@ -102,11 +98,11 @@ def round_filters(filters, global_params):
   # Make sure that round down does not go down by more than 10%.
   if new_filters < 0.9 * filters:
     new_filters += divisor
-  return new_filters
+  return int(new_filters)
 
 
-class MBConvBlock(object):
-  """A class of MnasNet/MobileNetV2 Inveretd Residual Bottleneck.
+class MnasBlock(object):
+  """A class of MnasNet Inveretd Residual Bottleneck.
 
   Attributes:
     has_se: boolean. Whether the block contains a Squeeze and Excitation layer
@@ -114,8 +110,8 @@ class MBConvBlock(object):
     endpoints: dict. A list of internal tensors.
   """
 
-  def __init__(self, block_args, global_params, layer_runtimes, dropout_rate):
-    """Initializes a MBConv block.
+  def __init__(self, block_args, global_params):
+    """Initializes a MnasNet block.
 
     Args:
       block_args: BlockArgs, arguments to create a MnasBlock.
@@ -134,15 +130,12 @@ class MBConvBlock(object):
         self._block_args.se_ratio > 0) and (self._block_args.se_ratio <= 1)
 
     self.endpoints = None
-    self.runtimes = layer_runtimes
-    self.dropout_rate = dropout_rate
 
-    self._search_space = global_params.search_space
     # Builds the block accordings to arguments.
     self._build()
 
   def _build(self):
-    """Builds MBConv block according to the arguments."""
+    """Builds MnasNet block according to the arguments."""
     filters = self._block_args.input_filters * self._block_args.expand_ratio
     if self._block_args.expand_ratio != 1:
       # Expansion phase:
@@ -160,29 +153,13 @@ class MBConvBlock(object):
           fused=True)
 
     kernel_size = self._block_args.kernel_size
-    if self._search_space is None: #  for "default" layers
-
-      # Default depth-wise convolution phase:
-      self._depthwise_conv = tf.keras.layers.DepthwiseConv2D(
+    # Depth-wise convolution phase:
+    self._depthwise_conv = tf.keras.layers.DepthwiseConv2D(
         [kernel_size, kernel_size],
         strides=self._block_args.strides,
         depthwise_initializer=conv_kernel_initializer,
         padding='same',
         use_bias=False)
-
-    # Learnable Depth-wise convolution Superkernel
-    elif self._search_space == 'mnasnet': 
-      self._depthwise_conv = DepthwiseConv2DMasked(
-        [kernel_size, kernel_size],
-        strides=self._block_args.strides,
-        depthwise_initializer=conv_kernel_initializer,
-        padding='same', runtimes=self.runtimes,
-        dropout_rate=self.dropout_rate,
-        use_bias=False)
-
-    else:
-      raise NotImplementedError('DepthConv not defined for %s' % self._search_space)
-
     self._bn1 = tf.layers.BatchNormalization(
         axis=self._channel_axis,
         momentum=self._batch_norm_momentum,
@@ -190,8 +167,6 @@ class MBConvBlock(object):
         fused=True)
 
     if self.has_se:
-      # why would you have SE in the supernet during search?
-      assert 1 == 0 
       num_reduced_filters = max(
           1, int(self._block_args.input_filters * self._block_args.se_ratio))
       # Squeeze and Excitation layer.
@@ -240,8 +215,8 @@ class MBConvBlock(object):
                     (se_tensor.shape))
     return tf.sigmoid(se_tensor) * input_tensor
 
-  def call(self, inputs, runtime, training=True):
-    """Implementation of MBConvBlock call().
+  def call(self, inputs, training=True):
+    """Implementation of MnasBlock call().
 
     Args:
       inputs: the inputs tensor.
@@ -257,8 +232,7 @@ class MBConvBlock(object):
       x = inputs
     tf.logging.info('Expand: %s shape: %s' % (x.name, x.shape))
 
-    x, runtime = self._depthwise_conv(x, runtime)
-    x = tf.nn.relu(self._bn1(x, training=training))
+    x = tf.nn.relu(self._bn1(self._depthwise_conv(x), training=training))
     tf.logging.info('DWConv: %s shape: %s' % (x.name, x.shape))
 
     if self.has_se:
@@ -274,47 +248,35 @@ class MBConvBlock(object):
       ) and self._block_args.input_filters == self._block_args.output_filters:
         x = tf.add(x, inputs)
     tf.logging.info('Project: %s shape: %s' % (x.name, x.shape))
-    return x, runtime
+    return x
 
 
-class SinglePathSuperNet(tf.keras.Model):
-  """class implements tf.keras.Model for SinglePath Supernet with superkernels
-     More details: Fig.2 -- Single-Path NAS: https://arxiv.org/abs/(TBD)
-     Based on MNasNet search space: https://arxiv.org/abs/1807.11626
+class MnasNetModel(tf.keras.Model):
+  """A class implements tf.keras.Model for MnesNet model.
+
+    Reference: https://arxiv.org/abs/1807.11626
   """
 
-  def __init__(self, blocks_args=None, global_params=None,dropout_rate=None):
-    """Initializes an `SuperNet` instance.
+  def __init__(self, blocks_args=None, global_params=None):
+    """Initializes an `MnasNetModel` instance.
 
     Args:
-      blocks_args: A list of BlockArgs to construct MBConv block modules.
+      blocks_args: A list of BlockArgs to construct MnasNet block modules.
       global_params: GlobalParams, a set of global parameters.
 
     Raises:
       ValueError: when blocks_args is not specified as a list.
     """
-    super(SinglePathSuperNet, self).__init__()
+    super(MnasNetModel, self).__init__()
     if not isinstance(blocks_args, list):
       raise ValueError('blocks_args should be a list.')
     self._global_params = global_params
     self._blocks_args = blocks_args
     self.endpoints = None
-    self.dropout_rate = dropout_rate
-
-    self._search_space = global_params.search_space
-
-    tf.logging.info('Runtime model parsed')
-    assert self._search_space == 'mnasnet' # currently supported one
-    lutmodel_filename = "./pixel1_runtime_model.json"
-    with open(lutmodel_filename, 'r') as f:
-      self._runtime_lut = json.load(f)
-
     self._build()
 
-
   def _build(self):
-    """Builds the supernet."""
-
+    """Builds a MnasNet model."""
     self._blocks = []
     # Builds blocks.
     for block_args in self._blocks_args:
@@ -326,22 +288,19 @@ class SinglePathSuperNet(tf.keras.Model):
           output_filters=round_filters(block_args.output_filters,
                                        self._global_params))
 
+      tf.logging.info('Block info -- input F: %s Output F: %s Block: %s kernel %s ratio %s' % 
+              (block_args.input_filters, block_args.output_filters, len(self._blocks),
+                  block_args.kernel_size, block_args.expand_ratio))
+
       # The first block needs to take care of stride and filter size increase.
-      layer_runtimes = [self._runtime_lut[str(len(self._blocks))][str(i)] 
-        for i in range(len(self._runtime_lut[str(len(self._blocks))].keys()))]
-      self._blocks.append(MBConvBlock(block_args, self._global_params, 
-                                    layer_runtimes, self.dropout_rate))
+      self._blocks.append(MnasBlock(block_args, self._global_params))
       if block_args.num_repeat > 1:
         # pylint: disable=protected-access
         block_args = block_args._replace(
             input_filters=block_args.output_filters, strides=[1, 1])
         # pylint: enable=protected-access
       for _ in xrange(block_args.num_repeat - 1):
-        layer_runtimes = [self._runtime_lut[str(len(self._blocks))][str(i)] 
-          for i in range(len(self._runtime_lut[str(len(self._blocks))].keys()))] + \
-                [0.7] # neglibible (ms) value for skip-op (non-zero handling purposes)
-        self._blocks.append(MBConvBlock(block_args, self._global_params, 
-                                      layer_runtimes, self.dropout_rate))
+        self._blocks.append(MnasBlock(block_args, self._global_params))
 
     batch_norm_momentum = self._global_params.batch_norm_momentum
     batch_norm_epsilon = self._global_params.batch_norm_epsilon
@@ -390,7 +349,7 @@ class SinglePathSuperNet(tf.keras.Model):
       self._dropout = None
 
   def call(self, inputs, training=True):
-    """Implementation of SuperNet call().
+    """Implementation of MnasNetModel call().
 
     Args:
       inputs: input tensors.
@@ -401,11 +360,6 @@ class SinglePathSuperNet(tf.keras.Model):
     """
     outputs = None
     self.endpoints = {}
-    self.indicators = {}
-
-    # rest of runtime (i.e., stem, head, logits, block0, block21)
-    total_runtime = 19.5999
-
     # Calls Stem layers
     with tf.variable_scope('mnas_stem'):
       outputs = tf.nn.relu(
@@ -415,15 +369,8 @@ class SinglePathSuperNet(tf.keras.Model):
     # Calls blocks.
     for idx, block in enumerate(self._blocks):
       with tf.variable_scope('mnas_blocks_%s' % idx):
-        outputs, total_runtime = block.call(outputs, total_runtime, training=training)
+        outputs = block.call(outputs, training=training)
         self.endpoints['block_%s' % idx] = outputs
-        # the indicator decisions 
-        if block._depthwise_conv.custom:
-          self.indicators['block_%s' % idx] = {
-                  'd5x5': block._depthwise_conv.d5x5,
-                  'd50c': block._depthwise_conv.d50c,
-                  'd100c': block._depthwise_conv.d100c}
-
         if block.endpoints:
           for k, v in six.iteritems(block.endpoints):
             self.endpoints['block_%s/%s' % (idx, k)] = v
@@ -436,5 +383,4 @@ class SinglePathSuperNet(tf.keras.Model):
         outputs = self._dropout(outputs, training=training)
       outputs = self._fc(outputs)
       self.endpoints['head'] = outputs
-
-    return outputs, total_runtime
+    return outputs

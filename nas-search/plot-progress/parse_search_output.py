@@ -1,3 +1,7 @@
+# Single-Path NAS (Apache License 2.0)
+# ==============================================================================
+"""Parsing the NAS search progress."""
+
 import numpy as np
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from collections import OrderedDict

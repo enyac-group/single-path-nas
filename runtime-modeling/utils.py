@@ -1,12 +1,18 @@
-# author: dstamoulis
+# Copyright 2018 The TensorFlow Authors. All Rights Reserved.
 #
-# This code extends codebase from the "MNasNet on TPU" GitHub repo:
-# https://github.com/tensorflow/tpu/tree/master/models/official/mnasnet
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# This project incorporates material from the project listed above, and it
-# is accessible under their original license terms (Apache License 2.0)
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 # ==============================================================================
-"""SinglePath utilities (MNasNet learning rate schedule + SinglePath dropout)."""
+"""MnasNet utilities."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -50,24 +56,6 @@ def build_learning_rate(initial_lr,
   return lr
 
 
-def build_dropout_rate(global_step, warmup_steps=2502):
-  tf.logging.info('Dropout rate warmup steps: %d' % warmup_steps)
-  warmup_dropout_rate = tf.cast(0.6, tf.float32)
-  final_dropout_rate = tf.cast(1e2, tf.float32)
-  dropout_rate = tf.cond(global_step < warmup_steps, lambda: warmup_dropout_rate, 
-               lambda:final_dropout_rate)
-  return dropout_rate
-
-
-def build_runtime_lambda(global_step, warmup_steps=2502, final_lambda=1.0):
-  tf.logging.info('Runtime lambda starts after steps: %d' % warmup_steps)
-  warmup_lambda_ = tf.cast(0.0, tf.float32)
-  final_lambda_ = tf.cast(final_lambda, tf.float32)
-  runtime_lambda = tf.cond(global_step < warmup_steps, lambda: warmup_lambda_, 
-               lambda:final_lambda_)
-  return runtime_lambda
-
-
 def build_optimizer(learning_rate,
                     optimizer_name='rmsprop',
                     decay=0.9,
@@ -89,3 +77,4 @@ def build_optimizer(learning_rate,
     tf.logging.fatal('Unknown optimizer:', optimizer_name)
 
   return optimizer
+
