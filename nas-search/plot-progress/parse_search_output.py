@@ -33,6 +33,7 @@ def encode_single_path_nas_arch(inds, hard=False):
   for layer_cnt in range(20):
 
     inds_row = inds[layer_cnt]
+    print(inds_row)
     if inds_row == [0.0, 0.0, 0.0]:
       idx = 4 # skip 
     elif inds_row == [0.0, 0.0, 1.0]:
