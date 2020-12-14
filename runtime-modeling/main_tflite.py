@@ -308,7 +308,7 @@ def gen_model_fn(features, labels, mode, params):
   if FLAGS.min_depth:
     override_params['min_depth'] = FLAGS.min_depth
 
-  logits, _ = models.build_model(
+  logits, _ = models.build_mnasnet_model(
       features,
       model_name=FLAGS.model_name,
       training=is_training,
