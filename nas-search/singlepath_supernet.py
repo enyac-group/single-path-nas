@@ -337,9 +337,7 @@ class SinglePathSuperNet(tf.keras.Model):
             input_filters=block_args.output_filters, strides=[1, 1])
         # pylint: enable=protected-access
       for _ in xrange(block_args.num_repeat - 1):
-        layer_runtimes = [self._runtime_lut[str(len(self._blocks))][str(i)] 
-          for i in range(len(self._runtime_lut[str(len(self._blocks))].keys()))] + \
-                [0.7] # neglibible (ms) value for skip-op (non-zero handling purposes)
+        layer_runtimes = layer_runtimes + [0.7] # neglibible (ms) value for skip-op (non-zero handling purposes)
         self._blocks.append(MBConvBlock(block_args, self._global_params, 
                                       layer_runtimes, self.dropout_rate))
 
