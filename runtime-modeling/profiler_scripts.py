@@ -43,13 +43,15 @@ def profiler_template(path):
   }
   return template
 
-import sys, json
+import os, sys, json
 if __name__ == '__main__':
 
   path = sys.argv[1]
   template = profiler_template(path)
 
   profiler_cfg_ = path + "profiler.json"
+  if not os.path.exists(os.path.dirname(profiler_cfg_)):
+      os.makedirs(os.path.dirname(profiler_cfg_))
   with open(profiler_cfg_, 'w') as f:
     json.dump(template, f)
 
