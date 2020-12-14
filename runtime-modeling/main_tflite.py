@@ -560,7 +560,7 @@ def export(est, export_dir, post_quantize=True):
       serving_input_receiver_fn=image_serving_input_fn)
 
   tf.logging.info('Starting to export TFLite.')
-  converter = tf.contrib.lite.TFLiteConverter.from_saved_model(
+  converter = tf.lite.TFLiteConverter.from_saved_model(
       os.path.join(export_dir, subfolder),
       input_arrays=['truediv'],
       output_arrays=['logits'])
