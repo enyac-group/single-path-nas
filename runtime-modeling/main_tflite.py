@@ -308,7 +308,7 @@ def gen_model_fn(features, labels, mode, params):
   if FLAGS.min_depth:
     override_params['min_depth'] = FLAGS.min_depth
 
-  logits, _ = models.build_model(
+  logits, _ = models.build_mnasnet_model(
       features,
       model_name=FLAGS.model_name,
       training=is_training,
@@ -560,8 +560,9 @@ def export(est, export_dir, post_quantize=True):
       serving_input_receiver_fn=image_serving_input_fn)
 
   tf.logging.info('Starting to export TFLite.')
-  converter = tf.contrib.lite.TFLiteConverter.from_saved_model(
-      os.path.join(export_dir, subfolder),
+  converter = tf.lite.TFLiteConverter.from_saved_model(
+    #   os.path.join(export_dir, str(subfolder)),
+      subfolder.decode(),
       input_arrays=['truediv'],
       output_arrays=['logits'])
   tflite_model = converter.convert()
@@ -570,8 +571,9 @@ def export(est, export_dir, post_quantize=True):
 
   if post_quantize:
     tf.logging.info('Starting to export quantized TFLite.')
-    converter = tf.contrib.lite.TFLiteConverter.from_saved_model(
-        os.path.join(export_dir, subfolder),
+    converter = tf.lite.TFLiteConverter.from_saved_model(
+        # os.path.join(export_dir, subfolder),
+        subfolder.decode(),
         input_arrays=['truediv'],
         output_arrays=['logits'])
     converter.post_training_quantize = True
